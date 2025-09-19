@@ -2,8 +2,8 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA v7)
-# CORREÇÃO: Sincroniza a senha do superusuário 'postgres' do banco de dados.
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA v8)
+# CORREÇÃO: Usa autenticação 'trust' temporariamente para configurar o PG.
 #
 # ==============================================================================
 set -e
@@ -66,32 +66,29 @@ setup_database() {
     
     log "Ajustando configurações do PostgreSQL"
     PG_CONF="/etc/postgresql/15/main/postgresql.conf"
+    PG_HBA="/etc/postgresql/15/main/pg_hba.conf"
+    
     sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
     echo "log_timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
     echo "timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
     echo "password_encryption = md5" >> "$PG_CONF"
 
-    PG_HBA="/etc/postgresql/15/main/pg_hba.conf"
-    sed -i '$ a\host    all             all             127.0.0.1/32            md5' "$PG_HBA"
+    # CORREÇÃO DE AUTENTICAÇÃO: Usa 'trust' temporariamente
+    log "Configurando autenticação 'trust' temporária para setup inicial"
+    sed -i '/^local\s\+all\s\+all\s\+peer/s/peer/trust/' "$PG_HBA"
     systemctl restart postgresql
-    sleep 5 # Pausa para garantir que o serviço reiniciou completamente
+    sleep 5
 
-    # CORREÇÃO: Sincroniza a senha do usuário 'postgres' do banco de dados
-    log "Definindo a senha para o usuário 'postgres' do banco de dados..."
+    log "Definindo senha para o superusuário 'postgres' do banco de dados"
     sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${POSTGRES_OS_PASS}';"
 
-    log "Criando banco de dados e roles iniciais"
-    export PGPASSWORD=$POSTGRES_OS_PASS
-    psql -h localhost -U ${POSTGRES_USER} -d postgres <<EOF
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${DB_NAME}';
+    log "Criando banco de dados e roles"
+    sudo -u postgres psql <<EOF
 DROP DATABASE IF EXISTS ${DB_NAME};
 CREATE DATABASE ${DB_NAME};
 EOF
-    unset PGPASSWORD
-
-    # Cria as outras roles no novo banco
-    export PGPASSWORD=$UGHU_DB_PASS
-    psql -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} <<EOF
+    
+    sudo -u postgres psql -d ${DB_NAME} <<EOF
 DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
 CREATE ROLE acesso_leitura;
 CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
@@ -99,7 +96,11 @@ CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO
 CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
 CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
 EOF
-    unset PGPASSWORD
+
+    log "Restaurando autenticação segura (md5) para o PostgreSQL"
+    sed -i '/^local\s\+all\s\+all\s\+trust/s/trust/peer/' "$PG_HBA" # Restaura o padrão
+    sed -i '$ a\host    all             all             127.0.0.1/32            md5' "$PG_HBA"
+    systemctl restart postgresql
 }
 
 setup_ldap() {
@@ -193,6 +194,7 @@ EOF
     done
     echo -e "\nWildfly iniciado com sucesso!"
 
+    export PGPASSWORD=$POSTGRES_OS_PASS
     JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
     
     log "Configurando DataSource no Wildfly"
@@ -200,7 +202,6 @@ EOF
     $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
 
     log "Restaurando banco de dados"
-    export PGPASSWORD=$POSTGRES_OS_PASS
     log "Verificando se o banco de dados '${DB_NAME}' está pronto para conexões..."
     TIMEOUT=60; START_TIME=$SECONDS
     until psql -h localhost -U ${POSTGRES_USER} -d "${DB_NAME}" -c '\q' &>/dev/null; do
@@ -214,6 +215,7 @@ EOF
     gunzip -f "${BACKUP_FILE_SOURCE}.gz"
     cp "${BACKUP_FILE_SOURCE}" "${BACKUP_FILE_TMP}"
     chown ${POSTGRES_USER}:${POSTGRES_USER} "${BACKUP_FILE_TMP}"
+    psql -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} -c "ALTER USER postgres WITH PASSWORD '${POSTGRES_OS_PASS}';"
     pg_restore -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
     unset PGPASSWORD
     rm -f "${BACKUP_FILE_TMP}"
