@@ -1,11 +1,10 @@
 #!/bin/bash
-
 # ==============================================================================
-# SCRIPT PARA CONTINUAR A INSTALAÇÃO DO AGHU APÓS O PG_RESTORE
+# SCRIPT PARA CONTINUAR A INSTALAÇÃO DO AGHU (COM CAMINHO DO FLYWAY CORRIGIDO)
 # ==============================================================================
 set -e
 
-# --- CONFIGURAÇÕES (devem ser as mesmas) ---
+# --- CONFIGURAÇÕES ---
 DOMAIN="sghmi.itupiranga.pa.gov.br"
 ADMIN_EMAIL="dti@itupiranga.pa.gov.br"
 INSTALL_DIR="/opt/aghu"
@@ -24,12 +23,12 @@ collect_postgres_password() {
     read -s -p "Digite a senha para o usuário 'postgres' do sistema: " POSTGRES_OS_PASS; echo
 }
 
-# --- FLUXO DE CONTINUAÇÃO ---
 main_continuation() {
     collect_postgres_password
 
     log "Executando migrações do Flyway"
-    cd "${SOURCES_DIR}/drop/aghu-db-migration"
+    # CORREÇÃO: Caminho ajustado para a subpasta correta
+    cd "${SOURCES_DIR}/drop/aghu-db-migration/aghu-db-migration"
     chmod +x flyway
     export PGPASSWORD=$POSTGRES_OS_PASS
     ./flyway -user=${POSTGRES_USER} -url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} -outOfOrder=true migrate
