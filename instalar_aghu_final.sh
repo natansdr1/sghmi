@@ -2,7 +2,7 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL COM DRIVER)
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL COM PAUSA DB)
 # BASEADO EM WILDFLY 26 + OPENJDK 11
 #
 # ==============================================================================
@@ -85,6 +85,10 @@ CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
 CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
 CREATE DATABASE ${DB_NAME};
 EOF
+    
+    # ADICIONADO: Pausa para garantir que o banco de dados esteja totalmente inicializado
+    log "Aguardando 10 segundos para a inicialização completa do banco de dados..."
+    sleep 10
 }
 
 setup_ldap() {
@@ -101,7 +105,6 @@ setup_application() {
     mkdir -p "${INSTALL_DIR}/wildfly"
     tar -xvzf wildfly-26.1.3.Final.tar.gz -C "${INSTALL_DIR}/wildfly" --strip-components=1
 
-    # ADICIONADO: Instalação do Driver JDBC do PostgreSQL
     log "Baixando e instalando o driver JDBC do PostgreSQL"
     wget https://jdbc.postgresql.org/download/postgresql-42.7.3.jar -P "${SOURCES_DIR}"
     MODULE_PATH="${INSTALL_DIR}/wildfly/modules/org/postgresql/jdbc/main"
