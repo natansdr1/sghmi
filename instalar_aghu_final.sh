@@ -2,9 +2,8 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA E ROBUSTA)
-# BASEADO EM WILDFLY 26 + OPENJDK 11
-# Autor: Gemini (Revisão Completa)
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA v2)
+# CORREÇÃO: Usuário de serviço criado com um shell válido (/bin/bash)
 #
 # ==============================================================================
 set -e
@@ -102,29 +101,36 @@ setup_application() {
     mkdir -p "${INSTALL_DIR}/wildfly"
     tar -xvzf wildfly-26.1.3.Final.tar.gz -C "${INSTALL_DIR}/wildfly" --strip-components=1
 
-    # ROBUSTEZ: Cria e verifica o usuário 'aghu'
-    log "Criando usuário de serviço 'aghu'"
+    # ROBUSTEZ: Cria e verifica o usuário 'aghu' com um shell válido
+    log "Criando usuário de serviço 'aghu' com shell /bin/bash"
     if id "${APP_USER}" &>/dev/null; then
-        log "Usuário '${APP_USER}' já existe."
-    else
-        useradd -r -d "${INSTALL_DIR}/wildfly" -s /bin/false ${APP_USER}
-        log "Usuário '${APP_USER}' criado."
+        log "Usuário '${APP_USER}' já existe. Removendo e recriando para garantir o shell correto."
+        userdel ${APP_USER}
     fi
-    id -u ${APP_USER} >/dev/null # Falha aqui se o usuário não foi criado corretamente
+    # A ALTERAÇÃO CRÍTICA ESTÁ AQUI
+    useradd -r -m -s /bin/bash -d "${INSTALL_DIR}/wildfly" ${APP_USER}
+    log "Usuário '${APP_USER}' criado com shell /bin/bash."
+    id -u ${APP_USER} >/dev/null
 
-    log "Configurando serviço do Wildfly"
-    cp ${INSTALL_DIR}/wildfly/docs/contrib/scripts/systemd/wildfly.conf /etc/default/wildfly
-    cp ${INSTALL_DIR}/wildfly/docs/contrib/scripts/systemd/launch.sh ${INSTALL_DIR}/wildfly/bin/
-    chmod +x ${INSTALL_DIR}/wildfly/bin/launch.sh
-    cp ${INSTALL_DIR}/wildfly/docs/contrib/scripts/systemd/wildfly.service /etc/systemd/system/
+    log "Configurando serviço do Wildfly (versão simplificada)"
+    cat <<EOF > /etc/systemd/system/wildfly.service
+[Unit]
+Description=The WildFly Application Server AGHU
+After=syslog.target network.target
 
-    # Ajusta as configurações do serviço
-    sed -i 's/JAVA_HOME=\/opt\/java\/jdk1.8.0_181/JAVA_HOME=\/usr\/lib\/jvm\/java-11-openjdk-amd64/' /etc/default/wildfly
-    sed -i 's/WILDFLY_USER=wildfly/WILDFLY_USER=aghu/' /etc/default/wildfly
+[Service]
+User=aghu
+Group=aghu
+ExecStart=/opt/aghu/wildfly/bin/standalone.sh -b=0.0.0.0 -bmanagement=0.0.0.0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
     sed -i 's/-Xms64m/-Xms2g/' ${INSTALL_DIR}/wildfly/bin/standalone.conf
     sed -i 's/-Xmx512m/-Xmx4g/' ${INSTALL_DIR}/wildfly/bin/standalone.conf
     
-    chown -R ${APP_USER}: "${INSTALL_DIR}"
+    chown -R ${APP_USER}:${APP_USER} "${INSTALL_DIR}"
     
     log "Adicionando usuário de gerenciamento 'admin'"
     ${INSTALL_DIR}/wildfly/bin/add-user.sh admin ${WILDFLY_ADMIN_PASS} --silent
@@ -139,13 +145,12 @@ setup_application() {
     INNER_MODULES_ZIP="${SOURCES_DIR}/ArquivosComplementares/Modules/aghu-wildfly-modules.zip"
     unzip -o "${INNER_MODULES_ZIP}" -d "${INSTALL_DIR}/wildfly/"
 
-    chown -R ${APP_USER}: "${INSTALL_DIR}"
+    chown -R ${APP_USER}:${APP_USER} "${INSTALL_DIR}"
 
     log "Iniciando Wildfly..."
     systemctl daemon-reload
     systemctl start wildfly
 
-    # ROBUSTEZ: Aguarda o Wildfly estar realmente pronto monitorando o log
     log "Aguardando Wildfly iniciar completamente (pode levar alguns minutos)..."
     TIMEOUT=300; START_TIME=$SECONDS
     while ! grep -q "WFLYSRV0025" "${INSTALL_DIR}/wildfly/standalone/log/server.log" 2>/dev/null; do
