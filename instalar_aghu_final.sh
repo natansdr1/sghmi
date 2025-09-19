@@ -2,8 +2,8 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA v2)
-# CORREÇÃO: Usuário de serviço criado com um shell válido (/bin/bash)
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL COM DRIVER)
+# BASEADO EM WILDFLY 26 + OPENJDK 11
 #
 # ==============================================================================
 set -e
@@ -101,15 +101,28 @@ setup_application() {
     mkdir -p "${INSTALL_DIR}/wildfly"
     tar -xvzf wildfly-26.1.3.Final.tar.gz -C "${INSTALL_DIR}/wildfly" --strip-components=1
 
-    # ROBUSTEZ: Cria e verifica o usuário 'aghu' com um shell válido
+    # ADICIONADO: Instalação do Driver JDBC do PostgreSQL
+    log "Baixando e instalando o driver JDBC do PostgreSQL"
+    wget https://jdbc.postgresql.org/download/postgresql-42.7.3.jar -P "${SOURCES_DIR}"
+    MODULE_PATH="${INSTALL_DIR}/wildfly/modules/org/postgresql/jdbc/main"
+    mkdir -p "${MODULE_PATH}"
+    mv "${SOURCES_DIR}/postgresql-42.7.3.jar" "${MODULE_PATH}/"
+    cat <<EOF > "${MODULE_PATH}/module.xml"
+<?xml version="1.0" ?>
+<module xmlns="urn:jboss:module:1.3" name="org.postgresql.jdbc">
+    <resources>
+        <resource-root path="postgresql-42.7.3.jar"/>
+    </resources>
+    <dependencies>
+        <module name="javax.api"/>
+        <module name="javax.transaction.api"/>
+    </dependencies>
+</module>
+EOF
+    
     log "Criando usuário de serviço 'aghu' com shell /bin/bash"
-    if id "${APP_USER}" &>/dev/null; then
-        log "Usuário '${APP_USER}' já existe. Removendo e recriando para garantir o shell correto."
-        userdel ${APP_USER}
-    fi
-    # A ALTERAÇÃO CRÍTICA ESTÁ AQUI
+    if id "${APP_USER}" &>/dev/null; then userdel ${APP_USER}; fi
     useradd -r -m -s /bin/bash -d "${INSTALL_DIR}/wildfly" ${APP_USER}
-    log "Usuário '${APP_USER}' criado com shell /bin/bash."
     id -u ${APP_USER} >/dev/null
 
     log "Configurando serviço do Wildfly (versão simplificada)"
