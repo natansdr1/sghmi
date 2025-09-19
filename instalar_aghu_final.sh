@@ -2,8 +2,8 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL E DEFINITIVA)
-# CORREÇÃO: Redefine as senhas APÓS o pg_restore para garantir compatibilidade MD5.
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA v7)
+# CORREÇÃO: Sincroniza a senha do superusuário 'postgres' do banco de dados.
 #
 # ==============================================================================
 set -e
@@ -74,13 +74,32 @@ setup_database() {
     PG_HBA="/etc/postgresql/15/main/pg_hba.conf"
     sed -i '$ a\host    all             all             127.0.0.1/32            md5' "$PG_HBA"
     systemctl restart postgresql
+    sleep 5 # Pausa para garantir que o serviço reiniciou completamente
+
+    # CORREÇÃO: Sincroniza a senha do usuário 'postgres' do banco de dados
+    log "Definindo a senha para o usuário 'postgres' do banco de dados..."
+    sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${POSTGRES_OS_PASS}';"
 
     log "Criando banco de dados e roles iniciais"
-    sudo -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d postgres <<EOF
+    export PGPASSWORD=$POSTGRES_OS_PASS
+    psql -h localhost -U ${POSTGRES_USER} -d postgres <<EOF
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${DB_NAME}';
 DROP DATABASE IF EXISTS ${DB_NAME};
 CREATE DATABASE ${DB_NAME};
 EOF
+    unset PGPASSWORD
+
+    # Cria as outras roles no novo banco
+    export PGPASSWORD=$UGHU_DB_PASS
+    psql -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} <<EOF
+DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
+CREATE ROLE acesso_leitura;
+CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
+CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO ugen_aghu;
+CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
+CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
+EOF
+    unset PGPASSWORD
 }
 
 setup_ldap() {
@@ -174,42 +193,30 @@ EOF
     done
     echo -e "\nWildfly iniciado com sucesso!"
 
+    JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
+    
+    log "Configurando DataSource no Wildfly"
+    $JBOSS_CLI "/subsystem=datasources/jdbc-driver=postgresql:add(driver-name=postgresql,driver-module-name=org.postgresql.jdbc,driver-class-name=org.postgresql.Driver)"
+    $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
+
     log "Restaurando banco de dados"
-    log "Verificando se o banco de dados '${DB_NAME}' está pronto..."
-    TIMEOUT=60; START_TIME=$SECONDS
     export PGPASSWORD=$POSTGRES_OS_PASS
-    until sudo -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d "${DB_NAME}" -c '\q' &>/dev/null; do
+    log "Verificando se o banco de dados '${DB_NAME}' está pronto para conexões..."
+    TIMEOUT=60; START_TIME=$SECONDS
+    until psql -h localhost -U ${POSTGRES_USER} -d "${DB_NAME}" -c '\q' &>/dev/null; do
         if (( SECONDS - START_TIME > TIMEOUT )); then echo "ERRO: Tempo limite esperando pelo banco '${DB_NAME}'."; exit 1; fi
         printf "."; sleep 2
     done
-    unset PGPASSWORD
-    echo -e "\nBanco de dados '${DB_NAME}' está pronto."
+    echo -e "\nBanco de dados '${DB_NAME}' está pronto para conexões."
     
     BACKUP_FILE_SOURCE="${SOURCES_DIR}/ArquivosComplementares/Base Zero/dbaghu_aghu1_0.backup"
     BACKUP_FILE_TMP="/tmp/dbaghu_aghu1_0.backup"
     gunzip -f "${BACKUP_FILE_SOURCE}.gz"
     cp "${BACKUP_FILE_SOURCE}" "${BACKUP_FILE_TMP}"
     chown ${POSTGRES_USER}:${POSTGRES_USER} "${BACKUP_FILE_TMP}"
-    sudo -u ${POSTGRES_USER} pg_restore -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
+    pg_restore -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
+    unset PGPASSWORD
     rm -f "${BACKUP_FILE_TMP}"
-
-    # CORREÇÃO DEFINITIVA: Recria as roles e redefine as senhas APÓS o restore
-    log "Recriando roles e redefinindo senhas para o formato MD5..."
-    sudo -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} <<EOF
-DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
-CREATE ROLE acesso_leitura;
-CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
-CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO ugen_aghu;
-CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
-CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
-ALTER USER postgres WITH PASSWORD '${POSTGRES_OS_PASS}';
-EOF
-
-    JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
-    
-    log "Configurando DataSource no Wildfly"
-    $JBOSS_CLI "/subsystem=datasources/jdbc-driver=postgresql:add(driver-name=postgresql,driver-module-name=org.postgresql.jdbc,driver-class-name=org.postgresql.Driver)"
-    $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
 
     log "Executando migrações do Flyway"
     cd "${SOURCES_DIR}/drop/aghu-db-migration/aghu-db-migration"; chmod +x flyway
@@ -220,8 +227,10 @@ EOF
     log "Importando menus e perfis de segurança"
     cd "${SOURCES_DIR}/ArquivosComplementares/aghu-seguranca"
     chmod +x seguranca.sh
+    export PGPASSWORD=$POSTGRES_OS_PASS
     ./seguranca.sh importar-menu jdbc:postgresql://127.0.0.1:5432/${DB_NAME} ${POSTGRES_USER} "'${POSTGRES_OS_PASS}'"
     ./seguranca.sh importar-seguranca jdbc:postgresql://127.0.0.1:5432/${DB_NAME} ${POSTGRES_USER} "'${POSTGRES_OS_PASS}'"
+    unset PGPASSWORD
 
     log "Fazendo deploy da aplicação AGHU"
     cp "${SOURCES_DIR}/drop/aghu-ear/target/aghu.ear" "${INSTALL_DIR}/wildfly/standalone/deployments/"
