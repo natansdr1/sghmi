@@ -1,23 +1,17 @@
 #!/bin/bash
 
 # ==============================================================================
-#
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL COM PAUSA DB)
-# BASEADO EM WILDFLY 26 + OPENJDK 11
-#
+# SCRIPT PARA CONTINUAR A INSTALAÇÃO DO AGHU APÓS O PG_RESTORE
 # ==============================================================================
 set -e
 
-# --- CONFIGURAÇÕES PRINCIPAIS ---
+# --- CONFIGURAÇÕES (devem ser as mesmas) ---
 DOMAIN="sghmi.itupiranga.pa.gov.br"
 ADMIN_EMAIL="dti@itupiranga.pa.gov.br"
-SYSTEM_FILE_ID="1Oo7yDW2ChA_w3qcp275YdQJnbjb6nIHS"
-COMPLEMENTARES_FILE_ID="1y7tm9uhL2Pe4c-O88qOBhPFFWBtgoZot"
 INSTALL_DIR="/opt/aghu"
 SOURCES_DIR="${INSTALL_DIR}/sources"
 DB_NAME="dbaghu"
 POSTGRES_USER="postgres"
-APP_USER="aghu"
 
 log() {
     echo "======================================================================"
@@ -25,178 +19,18 @@ log() {
     echo "======================================================================"
 }
 
-collect_passwords() {
-    log "Configuração de Senhas (não serão exibidas)"
+collect_postgres_password() {
+    log "Senha do Postgres necessária para continuar"
     read -s -p "Digite a senha para o usuário 'postgres' do sistema: " POSTGRES_OS_PASS; echo
-    read -s -p "Digite a senha para o administrador do OpenLDAP: " LDAP_ADMIN_PASS; echo
-    read -s -p "Digite a senha para 'ugen_aghu' do DB: " UGHU_DB_PASS; echo
-    read -s -p "Digite a senha para 'ugen_quartz' do DB: " QUARTZ_DB_PASS; echo
-    read -s -p "Digite a senha para 'ugen_seguranca' do DB: " SEGURANCA_DB_PASS; echo
-    read -s -p "Digite a senha para o admin do Wildfly: " WILDFLY_ADMIN_PASS; echo
 }
 
-prepare_system() {
-    log "Limpando instalações antigas para um começo limpo"
-    systemctl stop wildfly.service || true
-    rm -rf /etc/systemd/system/wildfly.service /etc/default/wildfly
-    rm -rf ${INSTALL_DIR}
-
-    log "Atualizando sistema e instalando dependências essenciais"
-    apt-get update && apt-get upgrade -y
-    apt-get install -y wget curl vim unzip htop git gnupg lsb-release ca-certificates apt-transport-https python3-pip debconf-utils apache2 certbot python3-certbot-apache cups
-    
-    log "Instalando OpenJDK 11 (padrão do sistema)"
-    apt-get install -y openjdk-11-jdk
-    
-    log "Instalando 'gdown' para downloads do Google Drive"
-    pip3 install gdown
-    
-    log "Criando diretórios de base"
-    mkdir -p "${SOURCES_DIR}"
-}
-
-setup_database() {
-    log "Instalando e configurando PostgreSQL 15 via repositório oficial"
-    apt-get install -y postgresql-common
-    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-    apt-get update
-    apt-get install -y postgresql-15
-
-    echo "${POSTGRES_USER}:${POSTGRES_OS_PASS}" | chpasswd
-    
-    log "Ajustando configurações do PostgreSQL"
-    PG_CONF="/etc/postgresql/15/main/postgresql.conf"
-    sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
-    echo "log_timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
-    echo "timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
-    PG_HBA="/etc/postgresql/15/main/pg_hba.conf"
-    echo "host    all             all             127.0.0.1/32            md5" >> "$PG_HBA"
-    systemctl restart postgresql
-
-    log "Recriando banco de dados e roles para garantir um ambiente limpo"
-    sudo -u ${POSTGRES_USER} psql -d postgres <<EOF
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${DB_NAME}';
-DROP DATABASE IF EXISTS ${DB_NAME};
-DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
-CREATE ROLE acesso_leitura;
-CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
-CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO ugen_aghu;
-CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
-CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
-CREATE DATABASE ${DB_NAME};
-EOF
-    
-    # ADICIONADO: Pausa para garantir que o banco de dados esteja totalmente inicializado
-    log "Aguardando 10 segundos para a inicialização completa do banco de dados..."
-    sleep 10
-}
-
-setup_ldap() {
-    log "Instalando e configurando o OpenLDAP de forma automatizada"
-    echo "slapd slapd/root_password password ${LDAP_ADMIN_PASS}" | debconf-set-selections
-    echo "slapd slapd/root_password_again password ${LDAP_ADMIN_PASS}" | debconf-set-selections
-    DEBIAN_FRONTEND=noninteractive apt-get install -y slapd ldap-utils
-}
-
-setup_application() {
-    log "Instalando Wildfly 26"
-    cd "${SOURCES_DIR}"
-    wget https://github.com/wildfly/wildfly/releases/download/26.1.3.Final/wildfly-26.1.3.Final.tar.gz
-    mkdir -p "${INSTALL_DIR}/wildfly"
-    tar -xvzf wildfly-26.1.3.Final.tar.gz -C "${INSTALL_DIR}/wildfly" --strip-components=1
-
-    log "Baixando e instalando o driver JDBC do PostgreSQL"
-    wget https://jdbc.postgresql.org/download/postgresql-42.7.3.jar -P "${SOURCES_DIR}"
-    MODULE_PATH="${INSTALL_DIR}/wildfly/modules/org/postgresql/jdbc/main"
-    mkdir -p "${MODULE_PATH}"
-    mv "${SOURCES_DIR}/postgresql-42.7.3.jar" "${MODULE_PATH}/"
-    cat <<EOF > "${MODULE_PATH}/module.xml"
-<?xml version="1.0" ?>
-<module xmlns="urn:jboss:module:1.3" name="org.postgresql.jdbc">
-    <resources>
-        <resource-root path="postgresql-42.7.3.jar"/>
-    </resources>
-    <dependencies>
-        <module name="javax.api"/>
-        <module name="javax.transaction.api"/>
-    </dependencies>
-</module>
-EOF
-    
-    log "Criando usuário de serviço 'aghu' com shell /bin/bash"
-    if id "${APP_USER}" &>/dev/null; then userdel ${APP_USER}; fi
-    useradd -r -m -s /bin/bash -d "${INSTALL_DIR}/wildfly" ${APP_USER}
-    id -u ${APP_USER} >/dev/null
-
-    log "Configurando serviço do Wildfly (versão simplificada)"
-    cat <<EOF > /etc/systemd/system/wildfly.service
-[Unit]
-Description=The WildFly Application Server AGHU
-After=syslog.target network.target
-
-[Service]
-User=aghu
-Group=aghu
-ExecStart=/opt/aghu/wildfly/bin/standalone.sh -b=0.0.0.0 -bmanagement=0.0.0.0
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    sed -i 's/-Xms64m/-Xms2g/' ${INSTALL_DIR}/wildfly/bin/standalone.conf
-    sed -i 's/-Xmx512m/-Xmx4g/' ${INSTALL_DIR}/wildfly/bin/standalone.conf
-    
-    chown -R ${APP_USER}:${APP_USER} "${INSTALL_DIR}"
-    
-    log "Adicionando usuário de gerenciamento 'admin'"
-    ${INSTALL_DIR}/wildfly/bin/add-user.sh admin ${WILDFLY_ADMIN_PASS} --silent
-    
-    log "Baixando e preparando arquivos da aplicação"
-    gdown --id "${SYSTEM_FILE_ID}" -O "${SOURCES_DIR}/sistema.zip"
-    gdown --id "${COMPLEMENTARES_FILE_ID}" -O "${SOURCES_DIR}/complementares.zip"
-    unzip -o "${SOURCES_DIR}/sistema.zip" -d "${SOURCES_DIR}"
-    unzip -o "${SOURCES_DIR}/complementares.zip" -d "${SOURCES_DIR}"
-
-    log "Extraindo módulos aninhados"
-    INNER_MODULES_ZIP="${SOURCES_DIR}/ArquivosComplementares/Modules/aghu-wildfly-modules.zip"
-    unzip -o "${INNER_MODULES_ZIP}" -d "${INSTALL_DIR}/wildfly/"
-
-    chown -R ${APP_USER}:${APP_USER} "${INSTALL_DIR}"
-
-    log "Iniciando Wildfly..."
-    systemctl daemon-reload
-    systemctl start wildfly
-
-    log "Aguardando Wildfly iniciar completamente (pode levar alguns minutos)..."
-    TIMEOUT=300; START_TIME=$SECONDS
-    while ! grep -q "WFLYSRV0025" "${INSTALL_DIR}/wildfly/standalone/log/server.log" 2>/dev/null; do
-        if (( SECONDS - START_TIME > TIMEOUT )); then
-            echo "ERRO: Tempo limite de ${TIMEOUT}s excedido esperando pelo Wildfly."
-            journalctl -xeu wildfly.service --no-pager
-            exit 1
-        fi
-        printf "."
-        sleep 5
-    done
-    echo -e "\nWildfly iniciado com sucesso!"
-
-    JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
-    
-    log "Configurando DataSource no Wildfly"
-    $JBOSS_CLI "/subsystem=datasources/jdbc-driver=postgresql:add(driver-name=postgresql,driver-module-name=org.postgresql.jdbc,driver-class-name=org.postgresql.Driver)"
-    $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
-
-    log "Restaurando banco de dados"
-    BACKUP_FILE_SOURCE="${SOURCES_DIR}/ArquivosComplementares/Base Zero/dbaghu_aghu1_0.backup"
-    BACKUP_FILE_TMP="/tmp/dbaghu_aghu1_0.backup"
-    gunzip -f "${BACKUP_FILE_SOURCE}.gz"
-    cp "${BACKUP_FILE_SOURCE}" "${BACKUP_FILE_TMP}"
-    chown ${POSTGRES_USER}:${POSTGRES_USER} "${BACKUP_FILE_TMP}"
-    sudo -u ${POSTGRES_USER} pg_restore -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v
-    rm -f "${BACKUP_FILE_TMP}"
+# --- FLUXO DE CONTINUAÇÃO ---
+main_continuation() {
+    collect_postgres_password
 
     log "Executando migrações do Flyway"
-    cd "${SOURCES_DIR}/drop/aghu-db-migration"; chmod +x flyway
+    cd "${SOURCES_DIR}/drop/aghu-db-migration"
+    chmod +x flyway
     export PGPASSWORD=$POSTGRES_OS_PASS
     ./flyway -user=${POSTGRES_USER} -url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} -outOfOrder=true migrate
     unset PGPASSWORD
@@ -204,16 +38,12 @@ EOF
     log "Importando menus e perfis de segurança"
     cd "${SOURCES_DIR}/ArquivosComplementares/aghu-seguranca"
     chmod +x seguranca.sh
-    ./seguranca.sh importar-menu jdbc:postgresql://127.0.0.1:5432/${DB_NAME} ${POSTGRES_USER} "${POSTGRES_OS_PASS}"
-    ./seguranca.sh importar-seguranca jdbc:postgresql://127.0.0.1:5432/${DB_NAME} ${POSTGRES_USER} "${POSTGRES_OS_PASS}"
+    ./seguranca.sh importar-menu jdbc:postgresql://127.0.0.1:5432/${DB_NAME} ${POSTGRES_USER} "'${POSTGRES_OS_PASS}'"
+    ./seguranca.sh importar-seguranca jdbc:postgresql://127.0.0.1:5432/${DB_NAME} ${POSTGRES_USER} "'${POSTGRES_OS_PASS}'"
 
-    log "Fazendo deploy da aplicação AGHU"
+    log "Fazendo deploy da aplicação AGHU (o Wildfly já deve estar rodando)"
     cp "${SOURCES_DIR}/drop/aghu-ear/target/aghu.ear" "${INSTALL_DIR}/wildfly/standalone/deployments/"
 
-    log "Configuração da aplicação finalizada."
-}
-
-setup_apache_and_finalize() {
     log "Configurando Apache como Proxy Reverso e gerando SSL"
     cat <<EOF > /etc/apache2/sites-available/aghu.conf
 <VirtualHost *:80>
@@ -247,14 +77,4 @@ EOF
     echo "======================================================================"
 }
 
-# --- FLUXO DE EXECUÇÃO ---
-main() {
-    collect_passwords
-    prepare_system
-    setup_database
-    setup_ldap
-    setup_application
-    setup_apache_and_finalize
-}
-
-main
+main_continuation
