@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA FINAL)
-# CORREÇÃO: Adiciona regra de autenticação IPv6 para o PostgreSQL.
+# CORREÇÃO: Utiliza autenticação 'trust' temporária para setup do PostgreSQL.
 #
 # ==============================================================================
 set -e
@@ -73,24 +73,22 @@ setup_database() {
     echo "timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
     echo "password_encryption = md5" >> "$PG_CONF"
 
-    # CORREÇÃO DE AUTENTICAÇÃO: Configura MD5 para IPv4 e IPv6
-    echo "host    all             all             127.0.0.1/32            md5" >> "$PG_HBA"
-    echo "host    all             all             ::1/128                 md5" >> "$PG_HBA"
-    
+    # CORREÇÃO DE AUTENTICAÇÃO: Usa 'trust' temporariamente para permitir a configuração inicial sem falhas.
+    log "Configurando autenticação 'trust' temporária para setup inicial"
+    sed -i -E "s/^(local\s+all\s+all\s+)peer/\1trust/" "$PG_HBA"
     systemctl restart postgresql
     sleep 5
 
-    log "Definindo a senha para o superusuário 'postgres' do banco de dados"
+    log "Definindo senha para o superusuário 'postgres' do banco de dados"
     sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${POSTGRES_OS_PASS}';"
 
     log "Criando banco de dados e roles"
-    export PGPASSWORD=$POSTGRES_OS_PASS
-    psql -h localhost -U ${POSTGRES_USER} -d postgres <<EOF
+    sudo -u postgres psql <<EOF
 DROP DATABASE IF EXISTS ${DB_NAME};
 CREATE DATABASE ${DB_NAME};
 EOF
-
-    psql -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} <<EOF
+    
+    sudo -u postgres psql -d ${DB_NAME} <<EOF
 DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
 CREATE ROLE acesso_leitura;
 CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
@@ -98,7 +96,12 @@ CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO
 CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
 CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
 EOF
-    unset PGPASSWORD
+
+    log "Restaurando autenticação segura (md5) para o PostgreSQL"
+    sed -i -E "s/^(local\s+all\s+all\s+)trust/\1peer/" "$PG_HBA"
+    echo "host    all             all             127.0.0.1/32            md5" >> "$PG_HBA"
+    echo "host    all             all             ::1/128                 md5" >> "$PG_HBA"
+    systemctl restart postgresql
 }
 
 setup_ldap() {
