@@ -2,8 +2,8 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL E ROBUSTA v5)
-# CORREÇÃO: Altera a criptografia da senha do PG para MD5 para compatibilidade com Flyway antigo.
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO FINAL E DEFINITIVA)
+# CORREÇÃO: Redefine as senhas APÓS o pg_restore para garantir compatibilidade MD5.
 #
 # ==============================================================================
 set -e
@@ -69,23 +69,16 @@ setup_database() {
     sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" "$PG_CONF"
     echo "log_timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
     echo "timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
-    # CORREÇÃO DE COMPATIBILIDADE: Força o uso de MD5 para o Flyway antigo
     echo "password_encryption = md5" >> "$PG_CONF"
 
     PG_HBA="/etc/postgresql/15/main/pg_hba.conf"
-    echo "host    all             all             127.0.0.1/32            md5" >> "$PG_HBA"
+    sed -i '$ a\host    all             all             127.0.0.1/32            md5' "$PG_HBA"
     systemctl restart postgresql
 
-    log "Recriando banco de dados e roles para garantir um ambiente limpo"
-    sudo -u ${POSTGRES_USER} psql -d postgres <<EOF
+    log "Criando banco de dados e roles iniciais"
+    sudo -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d postgres <<EOF
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${DB_NAME}';
 DROP DATABASE IF EXISTS ${DB_NAME};
-DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
-CREATE ROLE acesso_leitura;
-CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
-CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO ugen_aghu;
-CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
-CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
 CREATE DATABASE ${DB_NAME};
 EOF
 }
@@ -181,33 +174,42 @@ EOF
     done
     echo -e "\nWildfly iniciado com sucesso!"
 
-    JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
-    
-    log "Configurando DataSource no Wildfly"
-    $JBOSS_CLI "/subsystem=datasources/jdbc-driver=postgresql:add(driver-name=postgresql,driver-module-name=org.postgresql.jdbc,driver-class-name=org.postgresql.Driver)"
-    $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
-
     log "Restaurando banco de dados"
-    log "Verificando se o banco de dados '${DB_NAME}' está pronto para conexões..."
+    log "Verificando se o banco de dados '${DB_NAME}' está pronto..."
     TIMEOUT=60; START_TIME=$SECONDS
-    until sudo -u ${POSTGRES_USER} psql -d "${DB_NAME}" -c '\q' &>/dev/null; do
-        if (( SECONDS - START_TIME > TIMEOUT )); then
-            echo "ERRO: Tempo limite de ${TIMEOUT}s excedido esperando pelo banco de dados '${DB_NAME}'."
-            exit 1
-        fi
-        printf "."
-        sleep 2
+    export PGPASSWORD=$POSTGRES_OS_PASS
+    until sudo -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d "${DB_NAME}" -c '\q' &>/dev/null; do
+        if (( SECONDS - START_TIME > TIMEOUT )); then echo "ERRO: Tempo limite esperando pelo banco '${DB_NAME}'."; exit 1; fi
+        printf "."; sleep 2
     done
-    echo -e "\nBanco de dados '${DB_NAME}' está pronto para conexões."
+    unset PGPASSWORD
+    echo -e "\nBanco de dados '${DB_NAME}' está pronto."
     
     BACKUP_FILE_SOURCE="${SOURCES_DIR}/ArquivosComplementares/Base Zero/dbaghu_aghu1_0.backup"
     BACKUP_FILE_TMP="/tmp/dbaghu_aghu1_0.backup"
     gunzip -f "${BACKUP_FILE_SOURCE}.gz"
     cp "${BACKUP_FILE_SOURCE}" "${BACKUP_FILE_TMP}"
     chown ${POSTGRES_USER}:${POSTGRES_USER} "${BACKUP_FILE_TMP}"
-    sudo -u ${POSTGRES_USER} pg_restore -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
-
+    sudo -u ${POSTGRES_USER} pg_restore -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
     rm -f "${BACKUP_FILE_TMP}"
+
+    # CORREÇÃO DEFINITIVA: Recria as roles e redefine as senhas APÓS o restore
+    log "Recriando roles e redefinindo senhas para o formato MD5..."
+    sudo -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} <<EOF
+DROP ROLE IF EXISTS ugen_aghu; DROP ROLE IF EXISTS ugen_quartz; DROP ROLE IF EXISTS ugen_seguranca; DROP ROLE IF EXISTS acesso_completo; DROP ROLE IF EXISTS acesso_leitura;
+CREATE ROLE acesso_leitura;
+CREATE ROLE acesso_completo NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
+CREATE ROLE ugen_aghu LOGIN PASSWORD '${UGHU_DB_PASS}'; GRANT acesso_completo TO ugen_aghu;
+CREATE ROLE ugen_quartz LOGIN PASSWORD '${QUARTZ_DB_PASS}';
+CREATE ROLE ugen_seguranca LOGIN PASSWORD '${SEGURANCA_DB_PASS}'; GRANT acesso_completo TO ugen_seguranca;
+ALTER USER postgres WITH PASSWORD '${POSTGRES_OS_PASS}';
+EOF
+
+    JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
+    
+    log "Configurando DataSource no Wildfly"
+    $JBOSS_CLI "/subsystem=datasources/jdbc-driver=postgresql:add(driver-name=postgresql,driver-module-name=org.postgresql.jdbc,driver-class-name=org.postgresql.Driver)"
+    $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
 
     log "Executando migrações do Flyway"
     cd "${SOURCES_DIR}/drop/aghu-db-migration/aghu-db-migration"; chmod +x flyway
@@ -266,7 +268,6 @@ main() {
     collect_passwords
     prepare_system
     setup_database
-    setup_ldap
     setup_application
     setup_apache_and_finalize
 }
