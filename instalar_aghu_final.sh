@@ -2,8 +2,8 @@
 
 # ==============================================================================
 #
-# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA FINAL)
-# CORREÇÃO: Utiliza autenticação 'trust' temporária para setup do PostgreSQL.
+# Guia de Instalação Unificada do AGHU - Itupiranga (VERSÃO DEFINITIVA FINAL v2)
+# CORREÇÃO: Passa a variável PGPASSWORD explicitamente para o sudo.
 #
 # ==============================================================================
 set -e
@@ -73,7 +73,6 @@ setup_database() {
     echo "timezone = 'America/Sao_Paulo'" >> "$PG_CONF"
     echo "password_encryption = md5" >> "$PG_CONF"
 
-    # CORREÇÃO DE AUTENTICAÇÃO: Usa 'trust' temporariamente para permitir a configuração inicial sem falhas.
     log "Configurando autenticação 'trust' temporária para setup inicial"
     sed -i -E "s/^(local\s+all\s+all\s+)peer/\1trust/" "$PG_HBA"
     systemctl restart postgresql
@@ -195,7 +194,6 @@ EOF
     done
     echo -e "\nWildfly iniciado com sucesso!"
 
-    export PGPASSWORD=$POSTGRES_OS_PASS
     JBOSS_CLI="${INSTALL_DIR}/wildfly/bin/jboss-cli.sh --connect --user=admin --password=${WILDFLY_ADMIN_PASS}"
     
     log "Configurando DataSource no Wildfly"
@@ -203,9 +201,10 @@ EOF
     $JBOSS_CLI "data-source add --name=aghuDatasource --jndi-name=java:/aghuDatasource --driver-name=postgresql --connection-url=jdbc:postgresql://127.0.0.1:5432/${DB_NAME} --user-name=ugen_aghu --password=${UGHU_DB_PASS} --validate-on-match=true --min-pool-size=5 --max-pool-size=50"
 
     log "Restaurando banco de dados"
+    # CORREÇÃO: Passa a variável PGPASSWORD explicitamente para o sudo
     log "Verificando se o banco de dados '${DB_NAME}' está pronto para conexões..."
     TIMEOUT=60; START_TIME=$SECONDS
-    until psql -h localhost -U ${POSTGRES_USER} -d "${DB_NAME}" -c '\q' &>/dev/null; do
+    until sudo PGPASSWORD=$POSTGRES_OS_PASS -u ${POSTGRES_USER} psql -h localhost -U ${POSTGRES_USER} -d "${DB_NAME}" -c '\q' &>/dev/null; do
         if (( SECONDS - START_TIME > TIMEOUT )); then echo "ERRO: Tempo limite esperando pelo banco '${DB_NAME}'."; exit 1; fi
         printf "."; sleep 2
     done
@@ -216,8 +215,7 @@ EOF
     gunzip -f "${BACKUP_FILE_SOURCE}.gz"
     cp "${BACKUP_FILE_SOURCE}" "${BACKUP_FILE_TMP}"
     chown ${POSTGRES_USER}:${POSTGRES_USER} "${BACKUP_FILE_TMP}"
-    pg_restore -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
-    unset PGPASSWORD
+    sudo PGPASSWORD=$POSTGRES_OS_PASS -u ${POSTGRES_USER} pg_restore -h localhost -U ${POSTGRES_USER} -d ${DB_NAME} --clean --if-exists "${BACKUP_FILE_TMP}" -v || echo "Avisos do pg_restore ignorados. Continuando..."
     rm -f "${BACKUP_FILE_TMP}"
 
     log "Executando migrações do Flyway"
